@@ -1,0 +1,112 @@
+﻿@page "/"
+@inject IJSRuntime Js
+
+<PageTitle>Exif Photo Analyzer</PageTitle>
+
+@using EXIFPhotosAnalyzer.UI.Services
+@using EXIFPhotosAnalyzer.Lib.Models
+@using EXIFPhotosAnalyzer.UI.Models
+@using Microsoft.AspNetCore.SignalR.Client
+@inject IExifAnalyzerService ExifService
+@inject NavigationManager Navigation
+
+@if (_histogramData == null)
+{
+    <div>
+        <input type="text" placeholder="Input path to your folder" @bind="_path"/>
+        <RadzenButton Click="@ProcessPhotos">Process photos</RadzenButton>
+        @if (_isLoading)
+        {
+            <progress max="100" value="@ProgressValue">@ProgressValue</progress>
+        }
+    </div>
+}
+else
+{
+    @_path;
+    <RadzenChart>
+        <RadzenColumnSeries Data="@_histogramData" CategoryProperty="Value" ValueProperty="ItemsCount">
+            <TooltipTemplate Context="data">
+                <div>
+                    @if (data.CameraModelsList is not null)
+                    {
+                        <ul>
+                            @foreach (var cameraModel in data.CameraModelsList)
+                            {
+                                <li>
+                                    @cameraModel.CameraModel : @cameraModel.Count
+                                </li>
+                            }
+                        </ul>
+                    }
+                </div>
+            </TooltipTemplate>
+        </RadzenColumnSeries>
+    </RadzenChart>
+    <RadzenButton Click="@DownloadCsv">Download data as CSV</RadzenButton>
+}
+@if (_errorMessage is not null)
+{
+    <p style="color: red">@_errorMessage</p>
+}
+
+@code {
+    private List<ChartData>? _histogramData;
+    private List<ExifInfo>? _detailedData;
+    private string? _path;
+    private HubConnection? _hubConnection;
+    private bool _isLoading;
+    public int ProgressValue;
+    private string? _errorMessage;
+
+    protected override async Task OnInitializedAsync()
+    {
+        _hubConnection = new HubConnectionBuilder()
+            .WithUrl(Navigation.ToAbsoluteUri("/progress"))
+            .Build();
+
+        _hubConnection.On<ExifInfoProgress>("UpdateProgress", async (progress) =>
+        {
+            ProgressValue = Convert.ToInt32(progress.Progress * 100);
+            Console.WriteLine(progress);
+            await InvokeAsync(StateHasChanged);
+
+        });
+
+        await _hubConnection.StartAsync();
+    }
+    private async Task ProcessPhotos()
+    {
+        try
+        {
+            _isLoading = true;
+            _errorMessage = null;
+            (_histogramData, _detailedData) = await ExifService.AnalyzeFolder(_path);
+            _isLoading = false;
+        }
+        catch (Exception e)
+        {
+            _isLoading = false;
+            _errorMessage = e.Message;
+        }
+    }
+
+    private async Task DownloadCsv()
+    {
+
+        await using var stream = await ExifService.GetCsvFromAnalyzedFolder(_detailedData);
+        var fileName = $"{_path}_analyzed.csv";
+
+        using var streamRef = new DotNetStreamReference(stream);
+
+        await Js.InvokeVoidAsync("downloadFileFromStream", fileName, streamRef);
+    }
+
+    public async ValueTask DisposeAsync()
+    {
+        if (_hubConnection is not null)
+        {
+            await _hubConnection.DisposeAsync();
+        }
+    }
+}
